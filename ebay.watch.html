@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script src="//ajax.googleapis.com/ajax/libs/jquery/2.0.3/jquery.min.js"></script>
+<script src="//ajax.googleapis.com/ajax/libs/jqueryui/1.10.3/jquery-ui.min.js"></script>
+<script src="jquery.datatables.min.js" type="text/javascript"></script>
+
+<script src="common.js" type="text/javascript"></script> <!-- this needs to load after everything else to add extensions -->
+<link type="text/css" href="redmond/jquery-ui-1.8.16.custom.css" rel="stylesheet" />	
+
+<title></title>
+
+
+<script type="text/javascript">
+	var EBAY_URL_DOMAIN_FILTER = '';
+	var EBAY_URL_SOLD_FILTER = '';
+	var EBAY_SUMMARY_DATA_TABLE = null;
+		// format should be:
+		// keywords
+		// avg new price
+		// avg used price
+	var EBAY_RECOMMENDED_DATA_TABLES = new Array();
+	var EBAY_ACTIVE_DATA_TABLES = new Array();
+		// these are in the format of
+		// itemId
+		// title
+		// gallery img
+		// selling status
+		// item type
+		// item category
+		// item price
+		// item bids
+		// item duration
+		// item end date
+		// item condition
+		// item shipping cost
+	var EBAY_RECOMMENDED_DATA = new Array();
+		// format should be:
+		// item id
+		// title
+		// img
+		// price
+		// end datetime
+
+	function getEbayDatatableHTML() {
+		return '<table class="ebay">			\
+					<thead>								\
+						<tr>							\
+							<th class="itemId">ItemID</th>				\
+							<th class="title">Title</th>				\
+							<th class="gallery-img">galleryURL</th>			\
+							<th class="item-selling">Status</th>				\
+							<th class="item-type">Listing</th>			\
+							<th class="item-type">Category</th>			\
+							<th class="item-price">Price</th>				\
+							<th class="item-bids">Bids</th>				\
+							<th class="item-duration">End/Duration</th>				\
+							<th class="item-end">End Date</th>				\
+							<th class="item-condition">Condition</th>			\
+							<th class="item-shipping">Shipping</th>			\
+						</tr>							\
+					</thead>							\
+					<tbody></tbody>						\
+				</table>';
+	}
+		
+	// this is a helper function to initialize the table and filters for
+	// a datatable, since we do it for both the active and completed results
+	// SWC 12/18/11
+	function setEbayDatatable(_div) {
+		// build the datatable
+		// note that we're hiding column 9 (end date)
+		
+		// great helper on table creation http://datatables.net/usage/columns
+		var _table = $('table.ebay',$(_div)).dataTable({
+			"bJQueryUI": true,
+			"bFilter":true,
+			"oLanguage": { "sSearch": "Search all columns:"	},
+			"aoColumnDefs": [
+				{ "bVisible": false, "aTargets": [ 9,0 ] },
+				{ "sType": "title-date", "aTargets": [ 8 ] }
+			]
+		});
+		
+
+	
+		$('table.ebay thead th',$(_div)).each(function(i) {
+			// since we're hiding columns 0 and 9, this gets all fucked up if you just use the normal code
+			// for adding filters
+			// oh, and btws, if this isn't an each() loop, but a for() loop, it fucks up the reference to i
+			// and doesn't work.  go figure.
+			// SWC 12/18/11
+			if (i==3||i==4||i==5) {
+				$('table.ebay thead th::nth-child(' + i + ')',$(_div)).html(fnCreateSelect(_table.fnGetColumnData(i)));
+				$('select', $('table.ebay thead th::nth-child(' + i + ')',$(_div))).change( function () {
+					_table.fnFilter($(this).val(), i);
+				} );
+			}
+		});
+		
+		// sort the table by things that ended most recently
+		_table.fnSort( [ [8,'asc'] ] );
+		
+		// and for some reason, even through we do the manual numbering above, this is all fucked up for the condition
+		// column and we have to fucking do the shit manually.  fuck.
+		$('table.ebay thead th::nth-child(9)',$(_div)).html(fnCreateSelect(_table.fnGetColumnData(10)));
+		$('select', $('table.ebay thead th::nth-child(9)',$(_div))).change( function () {
+			_table.fnFilter($(this).val(), 10);
+		} );
+		
+		// we'll return the table reference so that we can continue to do stuff with it
+		return _table;
+	}
+		
+	// helper function to build the URL string for the call to the eBay API
+	// so that we avoid having all this garbage inline
+	// SWC 12/18/11
+	function getEbayAPIURL(_action,_results,_sort,_keywords) {
+		return 'http://svcs.ebay.com/services/search/FindingService/v1?SECURITY-APPNAME=TranseoS-ea40-42ba-9966-cfa01c3ee1f0&SERVICE-VERSION=1.0.0&RESPONSE-DATA-FORMAT=JSON&callback=?&REST-PAYLOAD&outputSelector=CategoryHistogram' + ((EBAY_URL_DOMAIN_FILTER == 'All') ? '' : '&' + EBAY_URL_DOMAIN_FILTER) + '&OPERATION-NAME=' + _action + '&paginationInput.entriesPerPage=' + _results + '&sortOrder=' + _sort + '&keywords=' + encodeURI(_keywords);
+	}
+	
+	//((EBAY_URL_DOMAIN_FILTER == '') ? '' : '&domainFilter.domainName=' + EBAY_URL_DOMAIN_FILTER)
+
+
+	// helper class to build the HTML markup of an item going into the eBay datatable
+	// pretty straightforward
+	// SWC 12/18/11
+	function getTRForItem(_item,_noimages) {
+		_listingtype = _item.listingInfo[0].listingType[0];
+		_bids = (_listingtype == 'FixedPrice' || _listingtype == 'StoreInventory') ? 'N/A' : _item.sellingStatus[0].bidCount;
+		_shipping = (!_item.shippingInfo[0]['shippingServiceCost']) ? _item.shippingInfo[0].shippingType[0] : '$' + parseFloat(_item.shippingInfo[0].shippingServiceCost[0]['__value__']).toFixed(2);
+		_start = new Date(_item.listingInfo[0].startTime[0]);
+		_end = new Date(_item.listingInfo[0].endTime[0]);
+		/*
+			// use ths if we want to sort the completed items by duration of auction/sale, not ending date
+			_artificialend = new Date();
+			_artificialend.setSeconds(_artificialend.getSeconds()+(_start - _end)/1000);
+			_durationtext = (_item.sellingStatus[0].sellingState[0] == 'Active') ? getTimeDuration((_end - (new Date()))/1000) : getTimeDuration((_start - _end)/1000);
+			_durationsortdate = (_item.sellingStatus[0].sellingState[0] == 'Active') ? _end : _artificialend;
+		*/
+		_durationtext = (_item.sellingStatus[0].sellingState[0] == 'Active') ? getTimeDuration((_end - (new Date()))/1000) : _end;
+		_durationsortdate = _end;
+
+		_image = '<div><a target="_blank" href="' + _item.viewItemURL + '">' + ((!_noimages) ? '<img class="icon-link" src="' + _item.galleryURL + '" />' : '<img src="images/link.png" />') + '</a></div>';
+		_condition = (!_item['condition']) ? 'Unknown' : _item.condition[0].conditionDisplayName;
+
+		return '<tr>								\
+					<td class="itemId">				\
+						' + _item.itemId + '		\
+					</td>							\
+					<td class="title">				\
+						' + _item.title + '			\
+					</td>							\
+					<td class="gallery-img">		\
+						' + _image + '				\
+					</td>							\
+					<td class="item-selling">		\
+						' + _item.sellingStatus[0].sellingState[0] + '			\
+					</td>							\
+					<td class="item-type">		\
+						' + _listingtype + '			\
+					</td>							\
+					<td class="item-category">		\
+						' + _item.primaryCategory[0].categoryName[0] + '(' + _item.primaryCategory[0].categoryId[0] + ')			\
+					</td>							\
+					<td class="item-price">		\
+						$' + parseFloat(_item.sellingStatus[0].convertedCurrentPrice[0]['__value__']).toFixed(2) + '			\
+					</td>							\
+					<td class="item-bids">		\
+						' + _bids + '			\
+					</td>							\
+					<td class="item-duration">		\
+						<span title="' + _durationsortdate + '"></span>' + _durationtext + '		\
+					</td>							\
+					<td class="item-end">		\
+						' + _end + '			\
+					</td>							\
+					<td class="item-condition">		\
+						' + _condition + '			\
+					</td>							\
+					<td class="item-shipping">		\
+						' + _shipping + '			\
+					</td>							\
+				</tr>';
+	}
+
+	function initKeywordDIV(_element,_keywords,_divid) {
+		if ($('#' + _divid).length) $('#' + _divid).remove();
+		$(_element).append('<div id="' + _divid + '"></div>');
+		var _div = $('#' + _divid)
+		
+		// build the summary div
+		$(_div).append('																													\
+			<div class="accordion ebay-item-section">																						\
+				<h3><a href="#">ebay ' + _keywords + ' (summary)</a></h3>																	\
+				<div>																														\
+					<table cellspacing="0" cellpadding="0" class="item-summary"><thead></thead><tbody>										\
+						<tr><td colspan="2" class="title"><a name="' + _divid + '"></a></td></tr>											\
+						<tr><td class="label">average price</td><td class="data"><span class="avgprice"></span></td></tr>					\
+						<tr><td class="label">average new price</td><td class="data"><span class="avgpricenew"></span></td></tr>			\
+						<tr><td class="label">average used price</td><td class="data"><span class="avgpriceused"></span></td></tr>			\
+						<tr><td class="label">items sold</td><td class="data"><span class="soldcount"></span></td></tr>						\
+						<tr><td class="label">avg # of bids</td><td class="data"><span class="avgbids"></span></td></tr>					\
+						<tr><td class="label">items with bids</td><td class="data"><span class="withbids"></span></td></tr>					\
+					</tbody></table>																										\
+				</div>																														\
+				<h3><a href="#">ebay ' + _keywords + ' (completed)</a></h3>																	\
+				<div class="ebay-completed">' + getEbayDatatableHTML() + '</div>															\
+				<h3><a href="#">ebay ' + _keywords + ' (active)</a></h3>																	\
+				<div class="ebay-active">' + getEbayDatatableHTML() + '</div> 																\
+				<h3><a href="#">craigslist ' + _keywords + ' (active)</a></h3>																\
+				<div class="cl"><table></table></div> 																			\
+			</div>');
+					
+		// initialize the accordion for the divs
+		jQuery('.accordion',$(_div)).accordion({ 
+			autoHeight: false,
+			collapsible: true,
+			active: 0
+		});
+		
+		return _div;
+	}
+	
+	function loadEbayCompleted(_div,_keywords, _progressbarcallback) {
+		$.getJSON(getEbayAPIURL('findCompletedItems',100,'EndTimeSoonest',_keywords),function(data){
+			var _saleprice = 0;
+			var _salepricenew = 0;
+			var _salepriceused = 0;
+			var _bids = 0;
+			var _zerobids = 0;
+			var _count = data.findCompletedItemsResponse[0].searchResult[0]['item'].length;
+			var _soldcount = 0;
+			var _soldcountnew = 0;
+			var _soldcountused = 0;
+			var _bid = 0;
+			var _bidcount = 0;
+			
+			// for each item returned from eBay, calculate a bunch of crap and then build the 
+			// TR element and shove it in the table
+			$.each(data.findCompletedItemsResponse[0].searchResult[0]['item'], function(i, item) {
+				_bid = (item.sellingStatus[0]['bidCount']) ? parseInt((item.sellingStatus[0].bidCount)) : 0;
+				if (_bid > 0) {
+					_bidcount++;
+					_bids += _bid;
+				}
+				_sold = item.sellingStatus[0].sellingState[0];
+				if (_sold == 'EndedWithSales') {
+					var _price = parseFloat(item.sellingStatus[0].convertedCurrentPrice[0]['__value__']);
+					_soldcount++;
+					_saleprice += _price;
+					var _condition = (!item['condition']) ? 'Unknown' : item.condition[0].conditionDisplayName;
+					if (_condition == 'New' || _condition == 'New other (see details)') {
+						_salepricenew += _price;
+						_soldcountnew++;
+					}
+					else if (_condition == 'Used') {
+						_salepriceused += _price;
+						_soldcountused++;
+					}
+				}
+				//_condition = data.findCompletedItemsResponse[0].searchResult[0]['item'][0].condition[0].conditionDisplayName;
+				//_shippingcost = data.findCompletedItemsResponse[0].searchResult[0]['item'][0].shippingInfo[0].shippingServiceCost[0]['__value__'];
+
+				$('.ebay-completed table.ebay',$(_div)).append(getTRForItem(item,true));
+			});
+			var _soldpercent = (_soldcount/_count * 100).toFixed(2);
+			var _bidpercent = (_bidcount/_count * 100).toFixed(2);
+			var _avgpriceused = (_salepriceused/_soldcountused).toFixed(2);
+			var _avgpricenew = (_salepricenew/_soldcountnew).toFixed(2);
+
+			// create the datatable
+			var _table = setEbayDatatable($('.ebay-completed',$(_div)));
+
+			// set the initial sold/unsold filter
+			$('#ebay-input-notsold').trigger('change');
+			
+			// display all of the summary calculations
+			$('.item-summary .title a',$(_div)).text('latest ' + _count + ' item(s) for ' + _keywords);
+			$('.item-summary .title',$(_div)).append('<a href="#top" title="back to top"><img src="images/up.png" class="icon-uparrow" /></a>');
+			$('.item-summary .avgprice',$(_div)).text('$' + (_saleprice/_soldcount).toFixed(2) + '  (for items that were sold)');
+			$('.item-summary .avgpricenew',$(_div)).text('$' + _avgpricenew + '  (for the ' + _soldcountnew + ' new items that were sold)');
+			$('.item-summary .avgpriceused',$(_div)).text('$' + _avgpriceused + '  (for the ' + _soldcountused + ' used items that were sold)');
+			$('.item-summary .soldcount',$(_div)).text(_soldcount + '  (' + _soldpercent + '%)');
+			$('.item-summary .avgbids',$(_div)).text((_bids/_bidcount).toFixed(2) + '  (for items with any bids)');
+			$('.item-summary .withbids',$(_div)).text(_bidcount + '  (' + _bidpercent + '%)');
+
+			// push data into the datatable
+			var _rownum = EBAY_SUMMARY_DATA_TABLE.fnAddData([_keywords,'$' + getFloat(_avgpricenew).toFixed(2),'$' + getFloat(_avgpriceused).toFixed(2)]);
+			
+			if (_progressbarcallback) _progressbarcallback();
+
+		});
+	}
+	
+	function loadEbayActive(_div,_keywords, _progressbarcallback) {
+		// get active results
+		// unfortunately, eBay's API limits us to 100 results at a time.
+		// we're using the getEbayAPIURL helper function to format the URL
+		// to avoid having all the params specified inline			
+		// SWC 12/18/11
+		$.getJSON(getEbayAPIURL('findItemsAdvanced',100,'EndTimeSoonest',_keywords),function(data){
+
+			// for each item returned from eBay, build the TR element and shove it in the table
+			$.each(data.findItemsAdvancedResponse[0].searchResult[0]['item'], function(i, item) {
+				$('.ebay-active table.ebay',$(_div)).append(getTRForItem(item));
+			});
+
+			// create the datatable and put a reference to it in the EBAY_ACTIVE_DATA_TABLES var
+			var _table = setEbayDatatable($('.ebay-active',$(_div)));
+			EBAY_ACTIVE_DATA_TABLES[$(_div).attr('id')] = _table;
+
+			// add the dropdown for specific views of the active table
+			$('.ebay-active',$(_div)).prepend('<label>preset query:  </label><select class="ebay-active-presetquery"><option></option><option value="Ending in the next 2hrs">Ending in the next 2hrs</option></select>');
+			if (_progressbarcallback) _progressbarcallback();
+		});
+	}
+	
+	// helper class to build the HTML markup of an item going into the eBay datatable
+	// pretty straightforward
+	// SWC 12/18/11
+	function getTRForCLItem(_item,_noimages) {
+		_listingtype = _item.listingInfo[0].listingType[0];
+		_bids = (_listingtype == 'FixedPrice' || _listingtype == 'StoreInventory') ? 'N/A' : _item.sellingStatus[0].bidCount;
+		_shipping = (!_item.shippingInfo[0]['shippingServiceCost']) ? _item.shippingInfo[0].shippingType[0] : '$' + parseFloat(_item.shippingInfo[0].shippingServiceCost[0]['__value__']).toFixed(2);
+		_start = new Date(_item.listingInfo[0].startTime[0]);
+		_end = new Date(_item.listingInfo[0].endTime[0]);
+		/*
+			// use ths if we want to sort the completed items by duration of auction/sale, not ending date
+			_artificialend = new Date();
+			_artificialend.setSeconds(_artificialend.getSeconds()+(_start - _end)/1000);
+			_durationtext = (_item.sellingStatus[0].sellingState[0] == 'Active') ? getTimeDuration((_end - (new Date()))/1000) : getTimeDuration((_start - _end)/1000);
+			_durationsortdate = (_item.sellingStatus[0].sellingState[0] == 'Active') ? _end : _artificialend;
+		*/
+		_durationtext = (_item.sellingStatus[0].sellingState[0] == 'Active') ? getTimeDuration((_end - (new Date()))/1000) : _end;
+		_durationsortdate = _end;
+
+		_image = '<div><a target="_blank" href="' + _item.viewItemURL + '">' + ((!_noimages) ? '<img class="icon-link" src="' + _item.galleryURL + '" />' : '<img src="images/link.png" />') + '</a></div>';
+		_condition = (!_item['condition']) ? 'Unknown' : _item.condition[0].conditionDisplayName;
+
+	}
+
+	function loadCL(_div, _keywords, _progressbarcallback) {
+		$.getJSON('api/craigslist.php?query=' + encodeURI(_keywords),function(data){
+			// for each item returned from eBay, build the TR element and shove it in the table
+			$.each(data.items, function(i, item) {
+
+				$('.cl table',$(_div)).append(
+					'<tr>																									\
+						<td class="date">																					\
+							' + item.date + '																				\
+						</td>																								\
+						<td class="title">																					\
+							<a target="_new" class="bookmark-links" href="' + item.link + '">' + item.title + '</a>			\
+						</td>																								\
+						<td class="item-price">																				\
+							$' + getFloat(item.price).toFixed(2) + '														\
+						</td>																								\
+						<td class="item-location">																			\
+							' + item.location + '																			\
+						</td>																								\
+					</tr>');
+			});
+			$('.cl table',$(_div)).dataTable( {
+				"aoColumns": [
+					{ "sTitle": "Date" },
+					{ "sTitle": "Title" },
+					{ "sTitle": "Price" },
+					{ "sTitle": "Location" }
+				],
+				"bJQueryUI": true
+			});
+			
+			if (_progressbarcallback) _progressbarcallback();
+			// create the datatable and put a reference to it in the EBAY_ACTIVE_DATA_TABLES var
+			//var _table = setEbayDatatable($('.ebay-active',$(_div)));
+			//EBAY_ACTIVE_DATA_TABLES[$(_div).attr('id')] = _table;
+
+			// add the dropdown for specific views of the active table
+			//$('.ebay-active',$(_div)).prepend('<label>preset query:  </label><select class="ebay-active-presetquery"><option></option><option value="Ending in the next 2hrs">Ending in the next 2hrs</option></select>');
+		});
+	}
+	
+	function loadItem(_element, _keywords, _categories, _progressbarcallback) {
+		if (_categories)
+			EBAY_URL_DOMAIN_FILTER = _categories;
+		var _divid = getIDFriendlyString(_keywords);
+		var _div = initKeywordDIV(_element,_keywords,_divid)
+		loadEbayCompleted(_div,_keywords, _progressbarcallback);
+		loadEbayActive(_div,_keywords, _progressbarcallback);
+		loadCL(_div,_keywords, _progressbarcallback);
+		$('.bookmark-links',$(_element)).append('<a href="#' + _divid + '">' + _keywords + '</a>');
+	}
+</script>
+
+<script type="text/javascript">
+	$(document).ready(function () {
+		// when the checkbox is checked, do the filter
+		// this isn't doing a call to eBay's API because
+		// they don't support searching for sold/unsold items right now
+		// if this DOES start supporting sold/unsold filtering at the API level,
+		// we'll need to take this and trigger a refresh of the table; that's also
+		// why we've got the global var here - incase we need to use it in the URL building
+		// SWC 12/18/11
+		$('#ebay-input-notsold').change(function() {
+			EBAY_URL_SOLD_FILTER = $('#ebay-input-notsold').attr('checked');
+			$(".ebay-completed table.ebay thead th:eq(3) select").val((EBAY_URL_SOLD_FILTER == 'checked') ? 'EndedWithSales' : '');
+			$(".ebay-completed table.ebay thead th:eq(3) select").trigger('change');
+		});
+		
+		// when the form is submitted, empty the div where we're displaying results,
+		// then set the domain (category) filter to the dropdown value
+		// then start the item loading (loadItem() ...)
+		// also return false so that the form submit native function doesn't run
+		// SWC 12/18/11
+		$('#ebay-form-search').submit(function() {
+			loadItem($('#ebay-search-content'),$('#ebay-input-search').val(),$('#ebay-input-domain').val());
+			return false;
+		});
+		
+		jQuery('#ebay .accordion').accordion({ 
+			autoHeight: false 
+		});
+		
+		EBAY_SUMMARY_DATA_TABLE = $('#ebay-summary-content table').dataTable( {
+			"aoColumns": [
+				{ "sTitle": "Keywords" },
+				{ "sTitle": "Avg New Price" },
+				{ "sTitle": "Avg Used Price" }
+			],
+			"bJQueryUI": true,
+			"bFilter": false,
+			"bInfo": false
+		});
+
+		// add the corresponding filter action that happens when you select a specific preset query
+		// for active items
+		$('select.ebay-active-presetquery').live('change',function () {
+			// redraw the datatable, which'll apply filters
+			EBAY_ACTIVE_DATA_TABLES[$(this).parent().parent().parent().attr('id')].fnDraw();
+		});
+
+
+		// putting a filter function here because you can't apply filters to just one table and i don't want
+		// ui- or data-specific filters in the common.js library.
+		// this'll check to see if the end date of the auction (index 9) is between now and two hours from now
+		// if we're in the ebay-active table
+		// SWC 12/17/11
+		$.fn.dataTableExt.afnFiltering.push(
+			function( oSettings, aData, iDataIndex ) {
+				if (!$(oSettings.nTable).parent().parent().hasClass('ebay-active'))
+					return true;
+					
+				var _min = Date();
+				var _max = 0;
+				var _val = new Date(aData[9]);
+				
+				if ($('select.ebay-active-presetquery',$(oSettings.nTable).parent().parent()).val() == 'Ending in the next 2hrs') {
+					_min = new Date();
+					_max = new Date();
+					_max.setHours(_max.getHours()+2);
+				}
+				else
+					return true
+				if (_min <= _val && _max >= _val)
+					return true;
+				return false;
+			}
+		);
+
+		// image hover for active summary images
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		//////////// TO-DO get an image hover-over to work nicely.  shit is annoying right now.
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/*		$('.icon-link').live('mouseenter',function() {
+			//alert($(this).attr('src'));
+			$('<img src="' + $(this).attr('src') + '" class="icon-link-hover" />').insertBefore($(this));
+		});
+		/*$('img.icon-link-hover').live('mouseleave',function() {
+			$(this).remove();
+		});*/
+
+		// rowclicks in the summary table should build the recommended items in a subtable
+		// SWC 12/18/11
+		$('#ebay-summary-content table tr').live('click',function() {
+			// _div represents the container of the search results (keywords) that corresponds
+			// to the row that was just clicked on
+			var _div = $('#' + getIDFriendlyString(EBAY_SUMMARY_DATA_TABLE.fnGetData(this)[0]));
+			
+			if ($(this).next().hasClass('ebay-summary-content-recommended'))
+				$(this).next().toggle();
+			else {
+				$('<tr class="ebay-summary-content-recommended"><td colspan="4" style=""><table class="ebay-recommended"></table></td></tr>').insertAfter($(this));
+				
+				// get a data array from the datatable that's got the active items of the keywords we're
+				// dealing with
+				var _activedata = EBAY_ACTIVE_DATA_TABLES[$(_div).attr('id')].fnGetData();
+
+				// and then get the current avg new and avg used price from the row that you clicked on
+				// these are a 0-index array
+				var _curavgnew = getFloat(EBAY_SUMMARY_DATA_TABLE.fnGetData(this)[1]);
+				var _curavgused = getFloat(EBAY_SUMMARY_DATA_TABLE.fnGetData(this)[2]);
+
+				var _recommended = _activedata.filter(function(val) {
+					_curprice = getFloat(val[6]);
+					if (val[10] == 'New' || val[10] == 'New other (see details)')
+						return (_curprice < _curavgnew);
+					else
+						return (_curprice < _curavgused);
+				});
+				
+				for (var i=0;i<_recommended.length;i++) {
+					var _curmargin = 0;
+					if (_recommended[i][10] == 'New' || _recommended[i][10] == 'New other (see details)') {
+						//alert(_recommended[i][6] + ' ' + getFloat(_recommended[i][6]) + '/' + _curavgnew);
+						_curmargin = 1-getFloat(_recommended[i][6])/_curavgnew;
+					}
+					else
+						_curmargin = 1-getFloat(_recommended[i][6])/_curavgused;
+					
+					// repetetive splices are a pain in the dick
+					// we want to remove cols 3, 4, 5, 7, 8, 10, and 11
+					// but after we remove cols 3, 4, and 5 for the first time, the indexes are reset
+					// so we have to compensate.  fuck my life.
+					
+					_recommended[i].splice(3,3);		// remove selling status, type, category
+					_recommended[i].splice(4,2);  		// remove # bids, duration
+					_recommended[i].splice(5,2); 		// remove condition, shipping cost
+
+					_recommended[i].push((_curmargin*100).toFixed(4) + '%');
+				}
+
+				EBAY_RECOMMENDED_DATA_TABLES[$(_div).attr('id')] = $('table',$(this).next()).dataTable( {
+					"aaData": _recommended,
+					"aoColumns": [
+						{ "sTitle": "ItemId" },
+						{ "sTitle": "Title"  },
+						{ "sTitle": "Link"  },
+						{ "sTitle": "Price" },
+						{ "sTitle": "Ending" },
+						{ "sTitle": "% Margin" }
+					],
+					"bFilter": false,
+					"bInfo": true,
+					"bPaginate": true
+				});
+			}
+		});
+			
+		$('#ebay .progress').progressbar({ value: 0 });
+		var _itemlist = [
+			['canon 5d ii body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['canon 60d body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['canon 7d body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['canon 5d ii body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['canon 1d iv body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['canon 1ds iii body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['canon 24-70', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['canon 70-200 2.8', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['canon 580ex', 'categoryId(0)=48515&categoryId(1)=64345'],
+			['canon 430ex', 'categoryId(0)=48515&categoryId(1)=64345'],
+			['nikon d90 body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['nikon d7000 body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['nikon d300s body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['nikon d700 body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['nikon d3s body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['nikon d3x body', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['nikon 24-70', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['nikon 70-200', 'categoryId(0)=31388&categoryId(1)=3323'],
+			['nikon sb700', 'categoryId(0)=48515&categoryId(1)=64345'],
+			['nikon sb900', 'categoryId(0)=48515&categoryId(1)=64345'],
+			['nikon sb910', 'categoryId(0)=48515&categoryId(1)=64345']		
+		];
+		var _items = 21; // number of things we're loading
+		var _progressbarcallback = function() {
+			_progress = $('#ebay .progress').progressbar('option','value');
+			$('#ebay .progress').progressbar('option','value',_progress + 1/(_items*3)*100);
+			$('#ebay .progress div').text((parseInt(_progress) === 100) ? 'complete' : 'loading... ' + _progress.toFixed(2) + '%');
+		}
+		$('#ebay .progress').progressbar({ value: 0 });
+		_progress = $('#ebay .progress').progressbar('option','value',1/(_items*3)*100);
+		for(var i=0;i<_itemlist.length;i++)
+			loadItem($('#ebay-search-content'), _itemlist[i][0], _itemlist[i][1], _progressbarcallback);
+		
+
+	});
+		
+	
+	
+</script>
+
+<style type="text/css">
+	body * {
+		font-family:Calibri !important;
+	}
+	#ebay {
+		font-size:.75em;
+	}
+	#ebay h3 {
+		font-size:1.5em;
+	}
+	img.icon-uparrow {
+		width:20px;
+		padding:0 25px 0 25px;
+	}
+	table, thead, tbody, tr {
+		width:100% !important;
+	}
+	th {
+		width:auto !important;
+	}
+	table.ebay {
+		font-size:.75em;
+		color:#666;
+	}
+	table.ebay tbody {
+		text-align:left;
+	}
+	table.ebay td {
+		height:35px;
+	}
+	table.ebay .title {
+		width:250px;
+	}
+	table.ebay .gallery-img {
+		height:30px;
+	}
+	table.ebay .gallery-img img {
+		max-height:30px;
+		display:inline;
+	}
+	img.icon-link-hover {
+		position:absolute;
+		z-index:101;
+		height:auto;
+		width:auto;
+	}
+	.item-summary {
+		width:90%;
+		padding:10px;
+		margin:10px auto 25px auto;
+		border:solid 1px #36C;
+		font-size:1.5em;
+		color:#666;
+		text-align:left;
+	}
+	.item-summary table, .item-summary tr, .item-summary td {
+		margin:0;
+		padding:0;
+	}
+	.item-summary td {
+		border:solid 1px #dfdfdf;
+		border-top:none;
+	}	
+	.item-summary tr:first-child td {
+		border:none;
+		border-bottom:solid 1px #dfdfdf;
+		padding:0 0 0 15px;
+	}	
+	.item-summary .title a {
+		color:#36C;
+	}
+	.item-summary .data {
+		width:100%;
+		padding:0 0 0 25px;
+	}
+	.item-summary .label {
+		white-space:nowrap;
+		font-weight:600;
+		color:#000;
+		padding:0 10px 0 25px;
+	}
+	.ebay .search {
+		border:1px solid #36C;
+	}
+	#ebay-search-content {
+		height:50%;
+	}
+	.accordion div {
+		overflow:hidden;
+	}
+	#ebay-search-content .bookmark-links a, a.bookmark-links {
+		color:#39C;
+		font-size:1.25em;
+		/*font-weight:600;*/
+		padding:0 25px 0 25px;
+	}	
+	#ebay-search-content .bookmark-links a:hover, a.bookmark-links:hover {
+		text-decoration:none;
+		color:#36F;
+	}
+	#ebay-summary-content table tr.odd, table.ebay-recommended tr.odd {
+		background:#efefef;
+	}
+	#ebay-summary-content tr td {
+		cursor:pointer;
+		font-size:1.25em;
+	}
+	#ebay-summary-content table tr.even {
+		background:#fff;
+	}
+	table.ebay-recommended tr.even {
+		background:#FFC !important;
+	}
+	table.ebay-recommended tr:hover {
+		background:#FF6 !important;
+	}
+	#ebay-summary-content tr:hover, .ebay-active tr:hover, .ebay-completed tr:hover {
+		background:#FFC !important;
+	}
+	.ebay-recommended img {
+		height:35px;
+	}
+	.ebay-recommended {
+		font-size:.6em !important;
+	}
+	tr.ebay-summary-content-recommended>td {
+		background:#FFC;
+		border:1px solid #FC6;
+		-moz-border-radius: 4px;
+		-webkit-border-radius: 4px;
+		border-radius: 4px;
+		font-size:.6em;
+		border-top:none;
+	}
+	select.ebay-active-presetquery {
+		margin-bottom:10px
+	}
+	.ebay-active tbody, .ebay-completed tbody, .ebay-active thead tr, .ebay-completed thead tr, table.ebay-recommended thead tr
+	{
+		font-size:1.25em;
+	}
+	.ebay-item-section {
+		margin-top:20px !important;
+	}
+	.cl {
+	}
+</style>
+</head>
+<body>
+<div id="ebay">
+    <div class="progress"></div>
+	<div>
+    	<table>
+        	<tr><td style="width:300px">ebay auction fee</td><td>9%, max $100</td></tr>
+            <tr><td>ebay insertion fee</td><td>$1-2</td></tr>
+            </tr>
+        </table>
+    </div>
+	<div class="search">
+    	<form id="ebay-form-search">
+        	<input type="text" id="ebay-input-search" size="15">
+            <select size="1" id="ebay-input-domain">
+            	<option value="">All</option>
+            	<option value="categoryId(0)=31388&categoryId(1)=3323">Digital Cameras, Lenses</option>
+            	<option value="categoryId(0)=48515&categoryId(1)=64345">Flashes</option>
+            	<!--
+                    <option value="31388">Digital Cameras</option>
+                    <option value="3323">Flashes</option>
+                    <option value="Lenses">Lenses</option>
+                -->
+            </select>&nbsp;
+        	<label>sold only?</label><input type="checkbox" checked="true" id="ebay-input-notsold">
+            <input type="submit">
+        </form>
+    </div>
+    <div class="accordion">
+        <h3><a href="#">summary results</a></h3>
+        <div id="ebay-summary-content"><table></table></div>
+        <h3><a href="#">search results</a></h3>
+        <div id="ebay-search-content"><a name="top"></a><div class="bookmark-links"></div></div>
+	</div>
+</div>
+<div id="log">
+    </div>
+</body>
+</html>
+<!--
+	SWC 12/19/11
+    	check to see if a search is a repeat, and if it is, kill the div and replace it 
+        initKeywordDIV
+
+-->
